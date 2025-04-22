@@ -21,10 +21,7 @@ import {IRouterClient} from "@chainlink/contracts/src/v0.8/ccip/interfaces/IRout
 import {Client} from "@chainlink/contracts/src/v0.8/ccip/libraries/Client.sol";
 import {CCIPReceiver} from "@chainlink/contracts/src/v0.8/ccip/applications/CCIPReceiver.sol";
 
-contract dappunkCreations is ERC1155, ERC2981, ERC2771Context, CCIPReceiver, AccessControl, EIP712, ReentrancyGuard {
-    using Address for address;
-    using Strings for uint256;
-
+abstract contract stateVar {
     uint256 public platformFee;
     uint256 public pioneerFee;
     bool public uriSuffixEnabled = false;
@@ -35,18 +32,6 @@ contract dappunkCreations is ERC1155, ERC2981, ERC2771Context, CCIPReceiver, Acc
     string public name;
     string public symbol;
 
-    mapping(uint256 => bool) public sbt;
-    mapping(uint256 => bool) public stealth;
-    mapping(address => bool) public approvedContracts;
-    mapping(address => bool) public pioneers;
-    mapping(address => bool) public supportedTokens; // Supported ERC20 Tokens for payment
-    mapping(address => uint256) public agencyFee; // Agency fee
-    mapping(uint256 => uint256) public tokenMaxQty; // Total quantity of a token
-    mapping(uint256 => uint256) public tokenMintedQty; // Amount of token minted
-    mapping(address => address) public agencyCreator; // creator => agency
-    mapping(uint256 => address) public creatorRegistry; // Creator of token
-    mapping(address => uint256) public nonces;
-
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant FUND_MANAGER_ROLE = keccak256("FUND_MANAGER_ROLE");
@@ -56,7 +41,6 @@ contract dappunkCreations is ERC1155, ERC2981, ERC2771Context, CCIPReceiver, Acc
     bytes32 public constant REFUND_MANAGER_ROLE = keccak256("REFUND_MANAGER_ROLE");
     bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
     bytes32 public constant MARKET_PLACE = keccak256("MARKET_PLACE");
-    // bytes32 public constant CCIP_ROLE = keccak256("CCIP_ROLE");
 
     struct NFTVoucher {
         uint256 tokenId;
@@ -73,6 +57,29 @@ contract dappunkCreations is ERC1155, ERC2981, ERC2771Context, CCIPReceiver, Acc
         bytes creator;
         bytes validator;
     }
+
+    struct crossChainReceive {
+        uint256 tokenId;
+        uint256 quantity;
+        uint256 tokenMaxQty;
+        uint96 royalty;
+        bool isStealth;
+        bool isSbt;
+        address creator;
+    }
+
+    mapping(uint256 => bool) public sbt;
+    mapping(uint256 => bool) public stealth;
+    mapping(address => bool) public approvedContracts;
+    mapping(address => bool) public pioneers;
+    mapping(address => bool) public supportedTokens; // Supported ERC20 Tokens for payment
+    mapping(address => uint256) public agencyFee; // Agency fee
+    mapping(uint256 => uint256) public tokenMaxQty; // Total quantity of a token
+    mapping(uint256 => uint256) public tokenMintedQty; // Amount of token minted
+    mapping(address => address) public agencyCreator; // creator => agency
+    mapping(uint256 => address) public creatorRegistry; // Creator of token
+    mapping(address => uint256) public nonces;
+    mapping(address => bool) public allowedRouters; // all routers allowed to
 
     event Minted(address indexed creator, uint256 indexed tokenId, uint256 quantity, address indexed buyer);
     event Burnt(uint256 indexed tokenId, uint256 quantity);
@@ -95,6 +102,20 @@ contract dappunkCreations is ERC1155, ERC2981, ERC2771Context, CCIPReceiver, Acc
     error TokenSaleEnded(uint256 tokenId, uint256 end, uint256 now);
     error InvalidTokenQty721(uint256 tokenId);
     error InvalidTokenQty(uint256 tokenId, uint256 expected, uint256 actual);
+}
+
+contract dappunkCreations is
+    stateVar,
+    ERC1155,
+    ERC2981,
+    ERC2771Context,
+    CCIPReceiver,
+    AccessControl,
+    EIP712,
+    ReentrancyGuard
+{
+    using Address for address;
+    using Strings for uint256;
 
     constructor(
         address manager,
@@ -634,49 +655,34 @@ contract dappunkCreations is ERC1155, ERC2981, ERC2771Context, CCIPReceiver, Acc
 
     receive() external payable {}
 
+    // build the ccip message
+
+    // interact with the Router and send the CCIP message
+
+    // Override and build CCIPReceive
+    /*
+        struct EVMTokenAmount {
+            address token; // token address on the local chain.
+            uint256 amount; // Amount of tokens.
+        }
+
+        struct Any2EVMMessage {
+            bytes32 messageId; // MessageId corresponding to ccipSend on source.
+            uint64 sourceChainSelector; // Source chain selector.
+            bytes sender; // abi.decode(sender) if coming from an EVM chain.
+            bytes data; // payload sent in original message.
+            EVMTokenAmount[] destTokenAmounts; // Tokens and their amounts in their destination chain representation.
+        }
+    
+    */
+
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
-        
-    }
-
-
-    /// @notice Construct a CCIP message.
-    /// @dev This function will create an EVM2AnyMessage struct with all the necessary information for programmable tokens transfer.
-    /// @param _receiver The address of the receiver.
-    /// @param _token The creations Nft that is to be transferred
-    /// @param _amount The quantity of the tokens to be transferred.
-    /// @param _feeTokenAddress The address of the token used for fees. Set address(0) for native gas.
-    /// @return Client.EVM2AnyMessage Returns an EVM2AnyMessage struct which contains information for sending a CCIP message.
-    function _buildCCIPMessage(
-        address _receiver,
-        address _token,
-        uint256 _amount,
-        address _feeTokenAddress
-    ) private pure returns (Client.EVM2AnyMessage memory) {
-        // Set the token amounts
-        Client.EVMTokenAmount[]
-            memory tokenAmounts = new Client.EVMTokenAmount[](1);
-        tokenAmounts[0] = Client.EVMTokenAmount({
-            token: _token,
-            amount: _amount
-        });
-        // Create an EVM2AnyMessage struct in memory with necessary information for sending a cross-chain message
-        return
-            Client.EVM2AnyMessage({
-                receiver: abi.encode(_receiver), // ABI-encoded receiver address
-                data: hex"", // ABI-encoded string
-                tokenAmounts: tokenAmounts, // The amount and type of token being transferred
-                extraArgs: Client._argsToBytes(
-                    // Additional arguments, setting gas limit and allowing out-of-order execution.
-                    // Best Practice: For simplicity, the values are hardcoded. It is advisable to use a more dynamic approach
-                    // where you set the extra arguments off-chain. This allows adaptation depending on the lanes, messages,
-                    // and ensures compatibility with future CCIP upgrades. Read more about it here: https://docs.chain.link/ccip/best-practices#using-extraargs
-                    Client.GenericExtraArgsV2({
-                        gasLimit: 200_000, // Gas limit for the callback on the destination chain
-                        allowOutOfOrderExecution: true // Allows the message to be executed out of order relative to other messages from the same sender
-                    })
-                ),
-                // Set the feeToken to a feeTokenAddress, indicating specific asset will be used for fees
-                feeToken: _feeTokenAddress
-            });
+        // specify the logic here of what you want to do when you receive a message
+        // mint logic inhere
+        crossChainReceive memory receivedVoucher = abi.decode(message.data, (crossChainReceive));
+        if (balanceOf(receivedVoucher.creator, receivedVoucher.tokenId) != 0) revert(); // to avoid collisions on channels
+        // set royality
+        // set tokenMaxQty
+        // Increase the minted Qty
     }
 }
