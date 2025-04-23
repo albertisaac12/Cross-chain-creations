@@ -66,7 +66,8 @@ abstract contract stateVar {
         uint96 royalty;
         bool isStealth;
         bool isSbt;
-        address creator;
+        address owner;
+        address to;
     }
 
     mapping(uint256 => bool) public sbt;
@@ -81,7 +82,7 @@ abstract contract stateVar {
     mapping(uint256 => address) public creatorRegistry; // Creator of token
     mapping(address => uint256) public nonces;
     mapping(uint64 => bool) public allowedChainSelectors; // all routers allowed to
-    mapping(address=>bool) public allowedReceiver; 
+    mapping(address => bool) public allowedReceiver;
 
     event Minted(address indexed creator, uint256 indexed tokenId, uint256 quantity, address indexed buyer);
     event Burnt(uint256 indexed tokenId, uint256 quantity);
@@ -109,7 +110,6 @@ abstract contract stateVar {
     error invalidReceiver();
     error NotEnoughBalanceForFees(uint256 currentBalance, uint256 calculatedFees);
 
-
     enum PayFeesIn {
         Native,
         Link
@@ -131,6 +131,7 @@ contract dappunkCreations is
 
     LinkTokenInterface internal immutable i_linkToken;
     IRouterClient internal immutable ccipRouter;
+
     constructor(
         address manager,
         address minter,
@@ -173,7 +174,7 @@ contract dappunkCreations is
     }
 
     modifier onlyAllowedReceiver(address _receiver) {
-        if(!allowedReceiver[_receiver]) revert invalidReceiver();
+        if (!allowedReceiver[_receiver]) revert invalidReceiver();
         _;
     }
 
@@ -698,7 +699,7 @@ contract dappunkCreations is
     
     */
 
-   /*
+    /*
      struct EVM2AnyMessage {
         bytes receiver; // abi.encode(receiver address) for dest EVM chains.
         bytes data; // Data payload.
@@ -707,33 +708,33 @@ contract dappunkCreations is
         bytes extraArgs; // Populate this with _argsToBytes(EVMExtraArgsV2).
     }
     */
-   function addChainSelector(uint64 chainSelector) external onlyRole(MANAGER_ROLE) {
+    function addChainSelector(uint64 chainSelector) external onlyRole(MANAGER_ROLE) {
         emit chainSelectorAdded(chainSelector);
         allowedChainSelectors[chainSelector] = true;
-   }
-   function removeChainSelector(uint64 chainSelector) external onlyRole(MANAGER_ROLE) {
+    }
+
+    function removeChainSelector(uint64 chainSelector) external onlyRole(MANAGER_ROLE) {
         emit chainSelectorRemoved(chainSelector);
         allowedChainSelectors[chainSelector] = false;
-   }
+    }
 
-   function crossChainTransferFrom(address from,address to,uint256 tokenId,uint256 quantity,uint64 destinationChainSelector,PayFeesIn feesIn,address receiver) external nonReentrant onlyAllowedReceiver(receiver) returns(bytes32 messageId){
-        burn(tokenId,quantity);
+    function crossChainTransferFrom(
+        crossChainReceive calldata ccipVoucher,
+        uint64 destinationChainSelector,
+        PayFeesIn feesIn,
+        address receiver
+    ) external nonReentrant onlyAllowedReceiver(receiver) returns (bytes32 messageId) {
+        burn(ccipVoucher.tokenId, ccipVoucher.quantity);
         Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
             receiver: abi.encode(receiver),
-            data:abi.encode(from,to,tokenId,quantity),
+            data: abi.encode(ccipVoucher),
             tokenAmounts: new Client.EVMTokenAmount[](0),
-            extraArgs:Client._argsToBytes(
-                Client.GenericExtraArgsV2({
-                    gasLimit: 300_000,
-                    allowOutOfOrderExecution: true
-            })
-            ),
+            extraArgs: Client._argsToBytes(Client.GenericExtraArgsV2({gasLimit: 300_000, allowOutOfOrderExecution: true})),
             feeToken: feesIn == PayFeesIn.Link ? address(i_linkToken) : address(0)
-
         });
 
         // fees
-         uint256 fees = ccipRouter.getFee(destinationChainSelector, message);
+        uint256 fees = ccipRouter.getFee(destinationChainSelector, message);
 
         if (feesIn == PayFeesIn.Link) {
             if (fees > i_linkToken.balanceOf(address(this))) {
@@ -753,17 +754,31 @@ contract dappunkCreations is
             // Send the message through the router and store the returned message ID
             messageId = ccipRouter.ccipSend{value: fees}(destinationChainSelector, message);
         }
-
-   }
-
+    }
 
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
         // specify the logic here of what you want to do when you receive a message
         // mint logic inhere
         crossChainReceive memory receivedVoucher = abi.decode(message.data, (crossChainReceive));
-        if (balanceOf(receivedVoucher.creator, receivedVoucher.tokenId) != 0) revert(); // to avoid collisions on channels
-        // set royality
-        // set tokenMaxQty
-        // Increase the minted Qty
+        if (balanceOf(receivedVoucher.owner, receivedVoucher.tokenId) != 0) revert(); // to avoid collisions on channels
+            // set royality
+            // set tokenMaxQty
+            // Increase the minted Qty
+        address receiver;
+        if (receivedVoucher.owner == receivedVoucher.to) {
+            receiver = receivedVoucher.owner;
+        }else {
+            receiver = receivedVoucher.to;
+        }
+        _mint(receiver, receivedVoucher.tokenId, receivedVoucher.quantity, "");
+        tokenMaxQty[receivedVoucher.tokenId] = receivedVoucher.quantity;
+        address creator = address(uint160(receivedVoucher.tokenId >> 96));
+        _setTokenRoyalty(receivedVoucher.tokenId, creator, receivedVoucher.royalty);
+        
+        
+    }
+
+    function ccipReceive(Client.Any2EVMMessage calldata message) external override onlyRouter nonReentrant{
+        _ccipReceive(message);
     }
 }
