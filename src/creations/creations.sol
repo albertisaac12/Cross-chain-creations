@@ -20,6 +20,7 @@ import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol"
 import {IRouterClient} from "@chainlink/contracts/src/v0.8/ccip/interfaces/IRouterClient.sol";
 import {Client} from "@chainlink/contracts/src/v0.8/ccip/libraries/Client.sol";
 import {CCIPReceiver} from "@chainlink/contracts/src/v0.8/ccip/applications/CCIPReceiver.sol";
+import {LinkTokenInterface} from "@chainlink/contracts/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
 
 abstract contract stateVar {
     uint256 public platformFee;
@@ -79,13 +80,16 @@ abstract contract stateVar {
     mapping(address => address) public agencyCreator; // creator => agency
     mapping(uint256 => address) public creatorRegistry; // Creator of token
     mapping(address => uint256) public nonces;
-    mapping(address => bool) public allowedRouters; // all routers allowed to
+    mapping(uint64 => bool) public allowedChainSelectors; // all routers allowed to
+    mapping(address=>bool) public allowedReceiver; 
 
     event Minted(address indexed creator, uint256 indexed tokenId, uint256 quantity, address indexed buyer);
     event Burnt(uint256 indexed tokenId, uint256 quantity);
     event Refunded(uint256 indexed tokenId, address indexed from, uint256 qty);
     event Locked(uint256 tokenId);
     event Unlocked(uint256 tokenId);
+    event chainSelectorAdded(uint64 chainSelector);
+    event chainSelectorRemoved(uint64 chainSelector);
 
     error AccessDenied(bytes32 role, address sender);
     error AlreadyAdded(address account);
@@ -102,6 +106,14 @@ abstract contract stateVar {
     error TokenSaleEnded(uint256 tokenId, uint256 end, uint256 now);
     error InvalidTokenQty721(uint256 tokenId);
     error InvalidTokenQty(uint256 tokenId, uint256 expected, uint256 actual);
+    error invalidReceiver();
+    error NotEnoughBalanceForFees(uint256 currentBalance, uint256 calculatedFees);
+
+
+    enum PayFeesIn {
+        Native,
+        Link
+    }
 }
 
 contract dappunkCreations is
@@ -117,6 +129,8 @@ contract dappunkCreations is
     using Address for address;
     using Strings for uint256;
 
+    LinkTokenInterface internal immutable i_linkToken;
+    IRouterClient internal immutable ccipRouter;
     constructor(
         address manager,
         address minter,
@@ -127,7 +141,8 @@ contract dappunkCreations is
         address refundManager,
         address[] memory relayers,
         address forwarder,
-        address router
+        address router,
+        address linkTokenAddress
     ) ERC1155("") EIP712("moshpit", "1") ERC2771Context(forwarder) CCIPReceiver(router) {
         baseUri = "NoUrl";
         stealthUri = "StealthUrl";
@@ -148,10 +163,17 @@ contract dappunkCreations is
             _grantRole(RELAYER_ROLE, relayers[i]);
         }
         _setDefaultRoyalty(msg.sender, 1000);
+        i_linkToken = LinkTokenInterface(linkTokenAddress);
+        ccipRouter = IRouterClient(router);
     }
 
     modifier deprecated() {
         if (isDeprecated) revert Deprecated();
+        _;
+    }
+
+    modifier onlyAllowedReceiver(address _receiver) {
+        if(!allowedReceiver[_receiver]) revert invalidReceiver();
         _;
     }
 
@@ -471,7 +493,7 @@ contract dappunkCreations is
         return super._update(from, to, ids, values);
     }
 
-    function burn(uint256 tokenId, uint256 quantity) external {
+    function burn(uint256 tokenId, uint256 quantity) public {
         if (balanceOf(msg.sender, tokenId) < quantity) {
             revert InsufficientBalance();
         }
@@ -675,6 +697,65 @@ contract dappunkCreations is
         }
     
     */
+
+   /*
+     struct EVM2AnyMessage {
+        bytes receiver; // abi.encode(receiver address) for dest EVM chains.
+        bytes data; // Data payload.
+        EVMTokenAmount[] tokenAmounts; // Token transfers.
+        address feeToken; // Address of feeToken. address(0) means you will send msg.value.
+        bytes extraArgs; // Populate this with _argsToBytes(EVMExtraArgsV2).
+    }
+    */
+   function addChainSelector(uint64 chainSelector) external onlyRole(MANAGER_ROLE) {
+        emit chainSelectorAdded(chainSelector);
+        allowedChainSelectors[chainSelector] = true;
+   }
+   function removeChainSelector(uint64 chainSelector) external onlyRole(MANAGER_ROLE) {
+        emit chainSelectorRemoved(chainSelector);
+        allowedChainSelectors[chainSelector] = false;
+   }
+
+   function crossChainTransferFrom(address from,address to,uint256 tokenId,uint256 quantity,uint64 destinationChainSelector,PayFeesIn feesIn,address receiver) external nonReentrant onlyAllowedReceiver(receiver) returns(bytes32 messageId){
+        burn(tokenId,quantity);
+        Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
+            receiver: abi.encode(receiver),
+            data:abi.encode(from,to,tokenId,quantity),
+            tokenAmounts: new Client.EVMTokenAmount[](0),
+            extraArgs:Client._argsToBytes(
+                Client.GenericExtraArgsV2({
+                    gasLimit: 300_000,
+                    allowOutOfOrderExecution: true
+            })
+            ),
+            feeToken: feesIn == PayFeesIn.Link ? address(i_linkToken) : address(0)
+
+        });
+
+        // fees
+         uint256 fees = ccipRouter.getFee(destinationChainSelector, message);
+
+        if (feesIn == PayFeesIn.Link) {
+            if (fees > i_linkToken.balanceOf(address(this))) {
+                revert NotEnoughBalanceForFees(i_linkToken.balanceOf(address(this)), fees);
+            }
+
+            // Approve the Router to transfer LINK tokens on contract's behalf. It will spend the fees in LINK
+            i_linkToken.approve(address(ccipRouter), fees);
+
+            // Send the message through the router and store the returned message ID
+            messageId = ccipRouter.ccipSend(destinationChainSelector, message);
+        } else {
+            if (fees > address(this).balance) {
+                revert NotEnoughBalanceForFees(address(this).balance, fees);
+            }
+
+            // Send the message through the router and store the returned message ID
+            messageId = ccipRouter.ccipSend{value: fees}(destinationChainSelector, message);
+        }
+
+   }
+
 
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
         // specify the logic here of what you want to do when you receive a message
